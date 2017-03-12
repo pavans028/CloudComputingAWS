@@ -1,0 +1,271 @@
+import java.util.*;
+import java.io.*;
+
+/**
+ * 
+ * @author Pavan Shetty
+ * This class is use to read a given text file, merge 
+ * sort the strings in it and produce a output sorted file.
+ */
+public class SharedMemoryOneThread {
+     
+	
+	/**
+	 * we divide the file into small blocks. If the blocks 
+	 * are too small, we shall create too many temporary files.
+	 * If they are too big, we shall be using too much memory.
+	 * 
+	 * @param fileSorted
+	 * @return size of the block
+	 */
+    public static long estimateBestBlockSize(File fileSorted) {
+        long sizeOfFile = fileSorted.length();
+        //The temporary file size should not exceed the MAXTEMPFILESIZE mentioned below 
+        final int MAXTEMPFILESIZE = 1024;
+        long fileBlockSize = sizeOfFile / MAXTEMPFILESIZE ;
+        
+        //We restrict creating too many temporary files, 
+        //so if we have more RAM available at runtime then we grow the file size. 
+        long freeRuntimeMemory = Runtime.getRuntime().freeMemory();
+        if( fileBlockSize < freeRuntimeMemory/2)
+            fileBlockSize = freeRuntimeMemory/2;
+        else {
+            if(fileBlockSize >= freeRuntimeMemory) 
+              System.err.println("We expect to run out of memory. ");
+        }
+        return fileBlockSize;
+    }
+ 
+   
+ 
+    /**
+     * This will simply load the file by blocks of x rows, 
+     * then sort them in-memory, and write the result to 
+     * a bunch of temporary files that have to be merged later.
+     * 
+     * @param file flat file
+     * @return list of temporary flat files
+     * @throws IOException
+     */
+    public static List<File> sortFilesInBatch(File file) throws IOException {
+        List<File> files = new ArrayList<File>();
+        BufferedReader fileBufferReader = new BufferedReader(new FileReader(file));
+        long blockSize = estimateBestBlockSize(file);// in bytes
+        try{
+            List<String> stringList =  new ArrayList<String>();
+            String inputLine = "";
+            try {
+                while(inputLine != null) {
+                    long currentBlockSize = 0;// in bytes
+                    while((currentBlockSize < blockSize) 
+                    &&(   (inputLine = fileBufferReader.readLine()) != null) ){ 
+                        stringList.add(inputLine);
+                        currentBlockSize += inputLine.length();
+                    }
+                    files.add(sortAndSave(stringList));
+                    stringList.clear();
+                }
+            } catch(EOFException endOfFileException) {
+                if(stringList.size()>0) {
+                    files.add(sortAndSave(stringList));
+                    stringList.clear();
+                }
+            }
+        } finally {
+            fileBufferReader.close();
+        }
+        return files;
+    }
+ 
+ /**
+  * This method sorts the string in the using the merge sort logic and writes it to a pemprory file 
+  * @param tmpList list of strings to be sorted
+  * @return file where the sorted data is written
+  * @throws IOException
+  */
+    public static File sortAndSave(List<String> tmpList) throws IOException  {
+    	mergeSortStrings(tmpList,0,tmpList.size());
+    	
+        File newTmpFile = File.createTempFile("sortInBatch", "flatfile");
+        newTmpFile.deleteOnExit();
+        BufferedWriter fileBufferWritter = new BufferedWriter(new FileWriter(newTmpFile));
+        try {
+            for(String i : tmpList) {
+                fileBufferWritter.write(i);
+                fileBufferWritter.newLine();
+            }
+        } finally {
+            fileBufferWritter.close();
+        }
+        return newTmpFile;
+    }
+
+ 
+    /**
+     * This method merges the temporary flat files
+     * @param fileList files to be sorted
+     * @param outputfile this is the file where the merged data is written
+     * @param stringComparator String comparator object
+     * @return row count of the merged file
+     * @throws IOException
+     */
+    public static int mergeFilesAfterSort(List<File> fileList, File outputfile, final Comparator<String> stringComparator) throws IOException {
+        PriorityQueue<FileBuffer> fileBufferPriorityQueue = new PriorityQueue<FileBuffer>(11, 
+            new Comparator<FileBuffer>() {
+              public int compare(FileBuffer i, FileBuffer j) {
+                return stringComparator.compare(i.peek(), j.peek());
+              }
+            }
+        );
+        for (File file : fileList) {
+            FileBuffer binaryFileBuffer = new FileBuffer(file);
+            fileBufferPriorityQueue.add(binaryFileBuffer);
+        }
+        BufferedWriter fileBufferWriter = new BufferedWriter(new FileWriter(outputfile));
+        int rowcounter = 0;
+        try {
+            while(fileBufferPriorityQueue.size()>0) {
+                FileBuffer fileBuffer = fileBufferPriorityQueue.poll();
+                String r = fileBuffer.pop();
+                fileBufferWriter.write(r);
+                fileBufferWriter.newLine();
+                ++rowcounter;
+                if(fileBuffer.isEmpty()) {
+                    fileBuffer.fileBufferReader.close();
+                    fileBuffer.initialFile.delete();// we don't need you anymore
+                } else {
+                    fileBufferPriorityQueue.add(fileBuffer); // add it back
+                }
+            }
+        } finally { 
+            fileBufferWriter.close();
+            for(FileBuffer bfb : fileBufferPriorityQueue ) bfb.close();
+        }
+        return rowcounter;
+    }
+    
+    /**
+     * This method is used recursively to split an array of strings until there is only one element 
+     * left which is later merged in a sorted format.
+     * @param dataArray array of string to be sorted
+     * @param firstIndex first element in the array
+     * @param sizeOfArray Size of the Arraylist.
+     */
+    public static void mergeSortStrings(List<String> dataArray, int firstIndex, int sizeOfArray) {
+        int x1 = 0;
+        int x2 = 0;
+
+        if(sizeOfArray > 1) {
+            x1 = sizeOfArray/2;
+            x2 = sizeOfArray-x1;
+
+            mergeSortStrings(dataArray, firstIndex, x1);
+            mergeSortStrings(dataArray, firstIndex + x1, x2);
+        }
+
+        mergeAfterSort(dataArray, firstIndex, x1, x2);
+    }
+    
+    /**
+     * The split arrays produced by the mergeSortStrings method are sorted in the following function
+     * @param dataArray string list to be sorted
+     * @param firstIndex 
+     * @param x1
+     * @param x2
+     */
+    private static void mergeAfterSort(List<String> dataArray, int firstIndex, int x1, int x2)
+    {
+        String[] tempStringArray = new String[x1 + x2];
+        int copyIndex = 0;
+        int copyIndex1 = 0;
+        int copyIndex2 = 0;
+
+        while ((copyIndex1 < x1) && (copyIndex2 < x2))
+        {
+            if (dataArray.get(firstIndex + copyIndex1).compareTo(dataArray.get(firstIndex + x1 + copyIndex2)) < 0)
+                tempStringArray[copyIndex++] = dataArray.get(firstIndex + (copyIndex1++));
+            else
+                tempStringArray[copyIndex++] = dataArray.get(firstIndex + x1 + (copyIndex2++));
+        }
+
+        while (copyIndex1 < x1)
+            tempStringArray[copyIndex++] = dataArray.get(firstIndex + (copyIndex1++));
+        while (copyIndex2 < x2)
+            tempStringArray[copyIndex++] = dataArray.get(firstIndex + x1 + (copyIndex2++));
+
+        for (int i = 0; i < copyIndex; i++)
+            dataArray.set(firstIndex + i, tempStringArray[i]);
+
+    }
+ 
+    public static void main(String[] args) throws IOException {
+        if(args.length<2) {
+            System.out.println("Please enter input and output file names as arguments to this program");
+            return;
+        }
+        long startTime=System.nanoTime();
+        String inputFilePath = args[0];
+        String outputFilePath = args[1];
+        Comparator<String> stringComparator = new Comparator<String>() {
+            public int compare(String string1, String string2){
+                return string1.compareTo(string2);}};
+        List<File> sortedFileList = sortFilesInBatch(new File(inputFilePath)) ;
+        mergeFilesAfterSort(sortedFileList, new File(outputFilePath), stringComparator);
+        long endTime=System.nanoTime();
+        long elapsedTime=(endTime-startTime);
+        System.out.println("Elapsed Time to sort in secs-> "+(elapsedTime/1000000000));
+    }
+}
+
+/**
+ * This class is used to create a binary file buffer objects
+ * @author Pavan Shetty
+ *
+ */
+class FileBuffer  {
+    public static int SIZEOFBUFFER = 2048;
+    public BufferedReader fileBufferReader;
+    public File initialFile;
+    private String tempStore;
+    private boolean isEmpty;
+     
+    public FileBuffer(File f) throws IOException {
+        initialFile = f;
+        fileBufferReader = new BufferedReader(new FileReader(f), SIZEOFBUFFER);
+        reload();
+    }
+     
+    public boolean isEmpty() {
+        return isEmpty;
+    }
+     
+    private void reload() throws IOException {
+        try {
+          if((this.tempStore = fileBufferReader.readLine()) == null){
+            isEmpty = true;
+            tempStore = null;
+          }
+          else{
+            isEmpty = false;
+          }
+      } catch(EOFException oef) {
+        isEmpty = true;
+        tempStore = null;
+      }
+    }
+     
+    public void close() throws IOException {
+        fileBufferReader.close();
+    }
+     
+     
+    public String peek() {
+        if(isEmpty()) return null;
+        return tempStore.toString();
+    }
+    public String pop() throws IOException {
+      String answer = peek();
+        reload();
+      return answer;
+    } 
+}
